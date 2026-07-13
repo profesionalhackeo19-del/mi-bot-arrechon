@@ -7,19 +7,20 @@ from telegram.ext import (ApplicationBuilder, CommandHandler, MessageHandler,
 from groq import Groq
 from supabase import create_client
 
-# Configuración de clientes (Render usará las variables de entorno)
+# --- CONFIGURACIÓN ---
+# Render leerá estas variables desde su pestaña "Environment"
 CLIENT = Groq(api_key=os.environ["GROQ_API_KEY"])
 SUPABASE = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
-ADMIN_ID = 8616315480
+ADMIN_ID = 8616315480  # Tu ID de Telegram
+QR_URL = "https://tu-enlace-de-imagen-aqui.jpg" 
 
-# Configuración de personalidad
 SYSTEM_PROMPT = (
     "Eres una mujer fascinante, inteligente y sumamente seductora. "
     "Tu tono es femenino, coqueto, seguro y siempre con un toque de picardía. "
     "Responde siempre de forma envolvente y mantén el misterio. No menciones que eres una IA."
 )
 
-# --- FUNCIÓN DE VERIFICACIÓN ---
+# --- LÓGICA DE BASE DE DATOS ---
 def es_premium(user_id):
     user = SUPABASE.table("usuarios").select("plan", "vencimiento").eq("id", user_id).execute().data
     if not user: return False
@@ -28,61 +29,68 @@ def es_premium(user_id):
         if datetime.now() < vencimiento:
             return True
         else:
+            # Plan vencido, actualizar a gratis
             SUPABASE.table("usuarios").update({"plan": "gratis"}).eq("id", user_id).execute()
     return False
 
-# --- COMANDO ADMINISTRATIVO (ANUNCIOS Y VIDEOS) ---
-async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID: return
-    usuarios = SUPABASE.table("usuarios").select("id").execute().data
-    for u in usuarios:
-        try:
-            if update.message.photo:
-                await context.bot.send_photo(u['id'], update.message.photo[-1].file_id, caption=update.message.caption)
-            elif update.message.video:
-                await context.bot.send_video(u['id'], update.message.video.file_id, caption=update.message.caption)
-            else:
-                texto = update.message.text.replace("/broadcast ", "")
-                await context.bot.send_message(u['id'], texto)
-        except: continue
-    await update.message.reply_text("Contenido enviado a todos exitosamente.")
+# --- COMANDOS ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    # Registrar automáticamente si es nuevo
+    usuario_existente = SUPABASE.table("usuarios").select("id").eq("id", user.id).execute().data
+    if not usuario_existente:
+        SUPABASE.table("usuarios").insert({"id": user.id, "username": user.username, "plan": "gratis"}).execute()
+    
+    keyboard = [
+        [InlineKeyboardButton("💳 Comprar Pack NSFW (10 Soles)", callback_data='comprar')],
+        [InlineKeyboardButton("💬 Chatear con la IA", callback_data='chat')]
+    ]
+    await update.message.reply_text("¡Hola! Soy tu compañera virtual. ¿En qué puedo complacerte hoy?", reply_markup=InlineKeyboardMarkup(keyboard))
 
-# --- MANEJO DE MENSAJES Y PAGOS ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     
-    # 1. Recibir comprobante de pago
-    if update.message.photo and user.id != ADMIN_ID:
-        keyboard = [[InlineKeyboardButton("Activar Plan (1 Mes)", callback_data=f"activar_{user.id}")]]
+    # 1. Si es foto, es comprobante
+    if update.message.photo:
+        keyboard = [[InlineKeyboardButton("✅ Activar Plan (1 Mes)", callback_data=f"activar_{user.id}")]]
         await context.bot.send_message(ADMIN_ID, f"Pago pendiente de @{user.username} (ID: {user.id})", reply_markup=InlineKeyboardMarkup(keyboard))
-        await update.message.reply_text("Comprobante recibido. En breve activaré tu plan.")
+        await update.message.reply_text("¡Recibido! Estoy verificando tu pago... te avisaré en cuanto estés listo.")
         return
 
-    # 2. Verificar acceso premium
+    # 2. Verificar acceso
     if not es_premium(user.id):
-        await update.message.reply_text("Hola... Para hablar conmigo necesitas activar tu plan premium (10 soles). Envía la foto de tu comprobante de Yape aquí.")
+        await update.message.reply_text("Para hablar conmigo debes activar tu acceso premium. Usa el botón de comprar en /start.")
         return
 
-    # 3. Respuesta con IA (Personalidad seductora)
+    # 3. Respuesta con IA
     respuesta = CLIENT.chat.completions.create(
         messages=[{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": update.message.text}],
         model="llama3-8b-8192"
     ).choices[0].message.content
     await update.message.reply_text(respuesta)
 
-# --- ACTIVACIÓN AUTOMÁTICA ---
 async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    if query.data.startswith("activar_"):
+    await query.answer()
+    
+    if query.data == 'comprar':
+        texto = "💰 *Pack NSFW - 10 Soles*\n\nRealiza el Yape al QR y envíame el comprobante por aquí."
+        await query.message.reply_photo(photo=QR_URL, caption=texto, parse_mode='Markdown')
+        
+    elif query.data == 'chat':
+        await query.message.reply_text("Escríbeme cualquier cosa para empezar a charlar (debes ser usuario premium).")
+        
+    elif query.data.startswith("activar_"):
         user_id = int(query.data.split("_")[1])
         vencimiento = (datetime.now() + timedelta(days=30)).isoformat()
         SUPABASE.table("usuarios").update({"plan": "premium", "vencimiento": vencimiento}).eq("id", user_id).execute()
-        await context.bot.send_message(user_id, "¡Plan activo, querido usuario! Ya puedes disfrutar de todo por 30 días.")
-        await query.edit_message_text("Usuario activado por 30 días.")
+        await context.bot.send_message(user_id, "¡Plan activado! Ya puedes disfrutar de nuestra compañía digital por 30 días.")
+        await query.edit_message_text("✅ Usuario activado exitosamente.")
 
 if __name__ == '__main__':
+    # Asegúrate de poner tu token de bot aquí o en las variables de entorno de Render
     app = ApplicationBuilder().token(os.environ["BOT_TOKEN"]).build()
-    app.add_handler(CommandHandler("broadcast", broadcast))
-    app.add_handler(MessageHandler(filters.PHOTO | filters.TEXT, handle_message))
+    app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_click))
+    app.add_handler(MessageHandler(filters.PHOTO | filters.TEXT, handle_message))
     app.run_polling()
