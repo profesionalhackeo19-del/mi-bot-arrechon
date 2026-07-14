@@ -1,20 +1,20 @@
 import os
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (ApplicationBuilder, CommandHandler, MessageHandler, 
                           CallbackQueryHandler, filters, ContextTypes)
 from groq import Groq
 from supabase import create_client
 
-# --- LOGGING PROFESIONAL ---
+# --- LOGGING ---
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
 # --- CONFIGURACIÓN ---
+# Asegúrate de tener estas variables configuradas en Render (Environment)
 CLIENT = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 SUPABASE = create_client(os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_KEY"))
 ADMIN_ID = 8616315480 
-QR_URL = os.environ.get("QR_URL", "https://tu-enlace-de-imagen-aqui.jpg")
 
 SYSTEM_PROMPT = (
     "Eres una modelo fascinante, inteligente y seductora. Tu tono es adulto, picante y directo. "
@@ -22,7 +22,7 @@ SYSTEM_PROMPT = (
     "No menciones que eres una IA, mantén el aura de exclusividad."
 )
 
-# --- SERVICIOS ---
+# --- LÓGICA PREMIUM ---
 def es_premium(user_id):
     try:
         response = SUPABASE.table("usuarios").select("plan", "vencimiento").eq("id", user_id).execute()
@@ -31,15 +31,13 @@ def es_premium(user_id):
         if user['plan'] == 'premium':
             if datetime.now() < datetime.fromisoformat(user['vencimiento']):
                 return True
-            SUPABASE.table("usuarios").update({"plan": "gratis"}).eq("id", user_id).execute()
     except Exception as e:
         logging.error(f"Error en base de datos: {e}")
     return False
 
-# --- HANDLERS ---
+# --- COMANDOS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    # Registro silencioso
     SUPABASE.table("usuarios").upsert({"id": user.id, "username": user.username, "plan": "gratis"}).execute()
     
     keyboard = [
@@ -49,29 +47,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✨ *Bienvenida a tu espacio exclusivo*\n\n¿Qué deseas explorar hoy?", 
                                     reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
-async def anuncio(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID: return
-    usuarios = SUPABASE.table("usuarios").select("id").execute().data
-    
-    enviados = 0
-    for u in usuarios:
-        try:
-            if update.message.photo:
-                await context.bot.send_photo(u['id'], update.message.photo[-1].file_id, caption=update.message.caption.replace("/anuncio ", ""))
-            else:
-                await context.bot.send_message(u['id'], update.message.text.replace("/anuncio ", ""))
-            enviados += 1
-        except Exception: continue
-    await update.message.reply_text(f"✅ Anuncio entregado a {enviados} usuarios.")
-
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Lógica de procesamiento de pagos
+    # Si envían foto, es un comprobante
     if update.message.photo:
-        await context.bot.send_message(ADMIN_ID, f"🔔 Pago pendiente de @{update.effective_user.username}")
+        await context.bot.send_message(ADMIN_ID, f"🔔 Nuevo comprobante de @{update.effective_user.username}")
         await update.message.reply_text("📸 Comprobante recibido. Estoy verificando tu pago...")
         return
 
-    # Lógica de Chat
+    # Si es texto, chat con IA
     if not es_premium(update.effective_user.id):
         await update.message.reply_text("🔒 *Acceso restringido*. Debes comprar el Pack para chatear conmigo.", parse_mode='Markdown')
         return
@@ -91,14 +74,19 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     
     if query.data == 'comprar':
-        await query.message.reply_photo(photo=QR_URL, caption="💰 *Pack Hot 18🔞*\n\nRealiza el pago y envíame la foto del comprobante aquí.", parse_mode='Markdown')
+        # ENVÍO DE ARCHIVO LOCAL
+        try:
+            with open('yape.png', 'rb') as foto:
+                await query.message.reply_photo(photo=foto, caption="💰 *Pack Hot 18🔞*\n\nRealiza el pago y envíame la foto del comprobante aquí.", parse_mode='Markdown')
+        except FileNotFoundError:
+            await query.message.reply_text("⚠️ Error técnico: Imagen de pago no encontrada.")
+            
     elif query.data == 'chat':
         await query.edit_message_text("✅ Escríbeme cualquier cosa para empezar a charlar...")
 
 if __name__ == '__main__':
     app = ApplicationBuilder().token(os.environ.get("BOT_TOKEN")).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("anuncio", anuncio))
     app.add_handler(CallbackQueryHandler(button_click))
     app.add_handler(MessageHandler(filters.PHOTO | filters.TEXT, handle_message))
     app.run_polling()
