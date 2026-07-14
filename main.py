@@ -1,21 +1,17 @@
-import os
-import json
-import logging
-import threading
+import os, json, logging, threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from telegram import Update, constants
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 from groq import Groq
 
-# 1. Configuración de Logging y Constantes
+# 1. Configuración
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+BOT_TOKEN, GROQ_API_KEY = os.environ.get("BOT_TOKEN"), os.environ.get("GROQ_API_KEY")
 ADMIN_ID = 8616315480 
 USERS_FILE = "usuarios.json"
-
-# 2. Inicialización de Groq y carga de usuarios persistentes
 client = Groq(api_key=GROQ_API_KEY)
+
+# 2. Persistencia
 def load_users():
     if os.path.exists(USERS_FILE):
         with open(USERS_FILE, "r") as f: return set(json.load(f))
@@ -26,44 +22,47 @@ def save_users(users):
 
 users_db = load_users()
 
-# 3. Servidor de Health Check (Mantiene el Web Service vivo en Render)
+# 3. Servidor de Health Check
 class HealthCheckHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200); self.end_headers(); self.wfile.write(b"Bot OK")
+    def do_GET(self): self.send_response(200); self.end_headers(); self.wfile.write(b"Bot OK")
+    def log_message(self, format, *args): return
+
 def run_health_check():
     port = int(os.environ.get("PORT", 10000))
     HTTPServer(('0.0.0.0', port), HealthCheckHandler).serve_forever()
 
-# 4. Funciones de Comandos
+# 4. Funciones
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    if user_id not in users_db:
-        users_db.add(user_id); save_users(users_db)
-    await update.message.reply_text("Hola. Usa /ayuda para ver los comandos disponibles.")
+    if user_id not in users_db: users_db.add(user_id); save_users(users_db)
+    await update.message.reply_text("Hola. Usa /ia para chatear o /pack18 para información de acceso.")
 
-async def cmd_ia(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = " ".join(context.args)
-    if not query:
-        await update.message.reply_text("Uso: /ia [tu pregunta]")
-        return
+async def handle_chat_ia(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Esto maneja texto normal y comandos /ia
+    query = update.message.text.replace("/ia", "").strip()
+    if not query: return
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=constants.ChatAction.TYPING)
     try:
         chat = client.chat.completions.create(messages=[{"role": "user", "content": query}], model="llama3-8b-8192")
         await update.message.reply_text(chat.choices[0].message.content)
     except Exception as e:
-        await update.message.reply_text(f"Error de IA: {e}")
+        await update.message.reply_text("Error de IA. Inténtalo más tarde.")
 
 async def cmd_pack18(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Sustituye este link por tu URL real de imagen del QR
-    qr_url = "https://i.imgur.com/TuCodigoQR.png" 
-    caption = "🔞 PACK VIP 18+ 🔞\nPrecio: 10 Soles\n\n1. Escanea el QR.\n2. Yapea 10 soles.\n3. Envía el comprobante a @Dratsystim."
-    await update.message.reply_photo(photo=qr_url, caption=caption)
+    # Cambia este link por tu QR real
+    qr_url = "https://i.imgur.com/TuCodigoQR.png"
+    msg = "🔞 PACK VIP 18+ 🔞\nPrecio: 10 Soles\n\n1. Yapea al QR.\n2. Envía la captura de pantalla por este chat.\nEl sistema notificará el pago automáticamente."
+    await update.message.reply_photo(photo=qr_url, caption=msg)
+
+async def handle_payment_proof(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Reenvía foto/comprobante al admin sin mostrar al admin al usuario
+    await context.bot.forward_message(chat_id=ADMIN_ID, from_chat_id=update.effective_chat.id, message_id=update.message.message_id)
+    await update.message.reply_text("✅ Comprobante enviado. En breve será verificado.")
 
 async def cmd_anuncio(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("Solo para el Admin."); return
+    if update.effective_user.id != ADMIN_ID: return
     if not update.message.reply_to_message:
-        await update.message.reply_text("Responde al mensaje/video que quieres difundir."); return
+        await update.message.reply_text("Responde al mensaje/media que quieres difundir."); return
     
     count = 0
     for user_id in users_db:
@@ -73,22 +72,18 @@ async def cmd_anuncio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except: continue
     await update.message.reply_text(f"Anuncio enviado a {count} usuarios.")
 
-async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"Bot Activo. Usuarios registrados: {len(users_db)}")
-
-async def cmd_ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = "/ia - Preguntar a IA\n/pack18 - Comprar acceso\n/status - Info\n/contacto - Admin"
-    await update.message.reply_text(msg)
-
-# 5. Ejecución del Bot
+# 5. Ejecución
 if __name__ == '__main__':
     threading.Thread(target=run_health_check, daemon=True).start()
     app = ApplicationBuilder().token(BOT_TOKEN).build()
+    
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("ia", cmd_ia))
     app.add_handler(CommandHandler("pack18", cmd_pack18))
     app.add_handler(CommandHandler("anuncio", cmd_anuncio))
-    app.add_handler(CommandHandler("status", cmd_status))
-    app.add_handler(CommandHandler("ayuda", cmd_ayuda))
-    logging.info("Bot Iniciado...")
+    
+    # Manejadores automáticos (estables)
+    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_chat_ia))
+    app.add_handler(CommandHandler("ia", handle_chat_ia))
+    app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, handle_payment_proof))
+    
     app.run_polling()
